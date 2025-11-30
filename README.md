@@ -3,13 +3,13 @@ This repository provides the official implementation of FlashAttention and
 FlashAttention-2 from the
 following papers.
 
-**FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness**  
-Tri Dao, Daniel Y. Fu, Stefano Ermon, Atri Rudra, Christopher Ré  
-Paper: https://arxiv.org/abs/2205.14135  
+**FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness**
+Tri Dao, Daniel Y. Fu, Stefano Ermon, Atri Rudra, Christopher Ré
+Paper: https://arxiv.org/abs/2205.14135
 IEEE Spectrum [article](https://spectrum.ieee.org/mlperf-rankings-2022) about our submission to the MLPerf 2.0 benchmark using FlashAttention.
 ![FlashAttention](assets/flashattn_banner.jpg)
 
-**FlashAttention-2: Faster Attention with Better Parallelism and Work Partitioning**  
+**FlashAttention-2: Faster Attention with Better Parallelism and Work Partitioning**
 Tri Dao
 
 Paper: https://tridao.me/publications/flash2/flash2.pdf
@@ -28,7 +28,7 @@ Please cite and credit FlashAttention if you use it.
 
 
 ## FlashAttention-3 beta release
-FlashAttention-3 is optimized for Hopper GPUs (e.g. H100). 
+FlashAttention-3 is optimized for Hopper GPUs (e.g. H100).
 
 Blogpost: https://tridao.me/blog/2024/flash3/
 
@@ -143,7 +143,7 @@ These features are supported in Fwd and Bwd
 8) ALiBi
 
 We are working on the following things
-1) Paged Attention 
+1) Paged Attention
 2) Sliding Window
 3) FP8
 4) Performance Improvements
@@ -151,7 +151,7 @@ We are working on the following things
 ##### Getting Started
 To get started with the triton backend for AMD, follow the steps below.
 
-First install the recommended Triton version 
+First install the recommended Triton version
 
 ```
 pip install triton==3.2.0
@@ -187,7 +187,7 @@ RUN pip install triton==3.2.0
 # install flash attention
 ENV FLASH_ATTENTION_TRITON_AMD_ENABLE="TRUE"
 
-RUN git clone https://github.com/ROCm/flash-attention.git &&\ 
+RUN git clone https://github.com/ROCm/flash-attention.git &&\
     cd flash-attention &&\
     git checkout main_perf &&\
     python setup.py install
@@ -394,27 +394,27 @@ If seqlen_q != seqlen_k and causal=True, the causal mask is aligned to the
 bottom right corner of the attention matrix, instead of the top-left corner.
 
 For example, if seqlen_q = 2 and seqlen_k = 5, the causal mask (1 = keep, 0 =
-masked out) is:  
-v2.0:  
-    1 0 0 0 0  
-    1 1 0 0 0  
-v2.1:  
-    1 1 1 1 0  
-    1 1 1 1 1  
+masked out) is:
+v2.0:
+    1 0 0 0 0
+    1 1 0 0 0
+v2.1:
+    1 1 1 1 0
+    1 1 1 1 1
 
-If seqlen_q = 5 and seqlen_k = 2, the causal mask is:  
-v2.0:  
-    1 0  
-    1 1  
-    1 1  
-    1 1  
-    1 1  
-v2.1:  
-    0 0  
-    0 0  
-    0 0  
-    1 0  
-    1 1  
+If seqlen_q = 5 and seqlen_k = 2, the causal mask is:
+v2.0:
+    1 0
+    1 1
+    1 1
+    1 1
+    1 1
+v2.1:
+    0 0
+    0 0
+    0 0
+    1 0
+    1 1
 If the row of the mask is all zero, the output will be zero.
 
 ### 2.2: Optimize for inference
@@ -455,6 +455,81 @@ Thanks to @Narsil and @lucidrains for this contribution.
 ### 2.7: Compatibility with torch compile
 
 Thanks to @ani300 for this contribution.
+
+### 2.8: Apple Silicon (MLX) Support
+
+Native support for Apple Silicon devices (M1/M2/M3) using the MLX backend with Metal compute.
+
+**Features:**
+- Seamless platform-aware installation: `pip install flash-attn` works on Apple Silicon
+- Same API: `from flash_attn import flash_attn_func` works identically across platforms
+- Automatic backend selection (CUDA for NVIDIA, ROCm for AMD, MLX for Apple Silicon)
+- Full support for: causal masking, GQA/MQA, sliding window attention, ALiBi, dropout
+- Automatic differentiation with gradient support
+- Variable-length (ragged) sequences via the `flash_attn_varlen_*` APIs—no padding or per-step re-packing required
+
+**Usage on Apple Silicon:**
+```python
+# Install
+pip install flash-attn mlx
+
+# Use (same API as CUDA/ROCm)
+from flash_attn import flash_attn_func
+import mlx.core as mx
+
+q = mx.random.normal((2, 512, 8, 64))
+k = mx.random.normal((2, 512, 8, 64))
+v = mx.random.normal((2, 512, 8, 64))
+
+output = flash_attn_func(q, k, v, causal=True)
+```
+
+See `examples/mlx/` for more examples including GQA, sliding window, and training with gradients.
+
+#### Variable-length sequences (ragged batches)
+
+The MLX backend now matches the CUDA interface for variable-length attention, letting you concatenate ragged sequences once and index them with cumulative sequence length arrays (`cu_seqlens`). This avoids padding costs while still supporting causal masks, sliding windows, GQA/MQA, paged KV caches, and soft caps on Apple Silicon.
+
+```python
+import itertools
+import mlx.core as mx
+from flash_attn.flash_attn_mlx import flash_attn_varlen_func
+
+# Example batch with uneven sequence lengths
+seqlens = [120, 48, 1, 256]
+cu_seqlens = mx.array([0, *itertools.accumulate(seqlens)], dtype=mx.int32)
+total_q = int(cu_seqlens[-1].item())
+
+nheads, nheads_k, headdim = 8, 8, 64
+q = mx.random.normal((total_q, nheads, headdim), dtype=mx.float16)
+k = mx.random.normal((total_q, nheads_k, headdim), dtype=mx.float16)
+v = mx.random.normal((total_q, nheads_k, headdim), dtype=mx.float16)
+
+out = flash_attn_varlen_func(
+    q, k, v,
+    cu_seqlens_q=cu_seqlens,
+    cu_seqlens_k=cu_seqlens,
+    max_seqlen_q=max(seqlens),
+    max_seqlen_k=max(seqlens),
+    causal=True,
+)
+```
+
+- Packed variants (`flash_attn_varlen_qkvpacked_func`, `flash_attn_varlen_kvpacked_func`) follow the same API shape as CUDA and reuse the same cu_seqlens vectors.
+- Varlen dropout currently falls back to the reference implementation; everything else (causal masks, sliding windows, softcap, ALiBi, paged KV cache) runs with Metal kernels.
+- Minimum requirements: macOS 14+, MLX ≥ 0.29, and concatenated tensors stored in MLX memory (no PyTorch↔MLX copies).
+- Compare padded vs. varlen performance on real workloads with `python benchmarks/benchmark_flash_attn_mlx.py --varlen-bench --quick` (the script reports latency and memory statistics for both layouts).
+
+The helper utilities in `flash_attn.flash_attn_mlx.precompile` already compile the varlen kernels when you pass `--varlen-only` or set `FLASH_ATTN_MLX_PRECOMPILE=1`, so warm-up and benchmarking flows remain identical to the dense attention path.
+
+#### Precompiling MLX Metal kernels (optional)
+
+MLX currently exposes Metal kernels through `mx.fast.metal_kernel`, which JIT-compiles shader sources the first time each kernel is requested inside a Python process. The compile step typically happens once per kernel, but you can hide the cost by precompiling the kernels before running latency-sensitive workloads:
+
+- **One-shot warm-up:** run `python -m flash_attn.flash_attn_mlx.precompile --varlen-only` to compile the variable-length kernels up front (omit `--varlen-only` to compile every registered MLX kernel). This CLI is safe to call multiple times and will skip work if the kernels are already cached in the process.
+- **Automatic warm-up:** set `FLASH_ATTN_MLX_PRECOMPILE=1` in your environment before importing `flash_attn`. Each kernel registers itself with the loader and will compile immediately once MLX exposes `mx.fast`.
+
+There is no persisted `.metallib` cache yet because MLX does not provide a public API for loading precompiled Metal libraries, so each process must still invoke the JIT compiler. The helpers above simply ensure compilation happens at a predictable point in time rather than the first attention call.
 
 ## Performance
 
