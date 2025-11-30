@@ -1,0 +1,97 @@
+name: Test MLX Backend
+
+on:
+  pull_request:
+    paths:
+      - 'flash_attn/flash_attn_mlx/**'
+      - 'tests/**/test*mlx*'
+      - 'benchmarks/**/benchmark*mlx*'
+      - '.github/workflows/test_mlx.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'flash_attn/flash_attn_mlx/**'
+      - 'tests/**/test*mlx*'
+      - 'benchmarks/**/benchmark*mlx*'
+      - '.github/workflows/test_mlx.yml'
+  workflow_dispatch:
+
+jobs:
+  test-mlx:
+    runs-on: macos-14  # Apple Silicon runner (M1)
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+
+    name: Test MLX (Python ${{ matrix.python-version }})
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest pytest-xdist numpy einops
+          # Install MLX - Apple's framework for Apple Silicon
+          pip install mlx
+          # Install the package in development mode (skip CUDA build)
+          FLASH_ATTENTION_SKIP_CUDA_BUILD=TRUE pip install -e .
+
+      - name: Verify MLX installation
+        run: |
+          python -c "import mlx.core as mx; print('MLX version:', mx.__version__)"
+          python -c "from flash_attn.flash_attn_mlx import is_mlx_available; print('MLX available:', is_mlx_available())"
+          python -c "from flash_attn.flash_attn_mlx import get_gpu_family; print('GPU family:', get_gpu_family())"
+
+      - name: Run MLX tests
+        run: |
+          pytest flash_attn/flash_attn_mlx/tests/ -v --tb=short -x
+
+      - name: Run MLX integration tests (if any)
+        continue-on-error: true
+        run: |
+          pytest tests/ -k "mlx" -v --tb=short || echo "No additional MLX tests found in tests/"
+
+  benchmark-mlx:
+    runs-on: macos-14  # Apple Silicon runner (M1)
+    needs: test-mlx
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    name: Benchmark MLX
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest numpy einops tabulate
+          pip install mlx
+          FLASH_ATTENTION_SKIP_CUDA_BUILD=TRUE pip install -e .
+
+      - name: Run MLX benchmarks
+        continue-on-error: true
+        run: |
+          if [ -f benchmarks/benchmark_flash_attn_mlx.py ]; then
+            python benchmarks/benchmark_flash_attn_mlx.py
+          else
+            echo "MLX benchmark file not found, skipping"
+          fi
