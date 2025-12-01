@@ -19,14 +19,7 @@ on:
 
 jobs:
   test-mlx:
-    # Available arm64 (Apple Silicon) macOS runners for MLX:
-    # - macos-14: macOS Sonoma (stable, M1)
-    # - macos-14-xlarge: macOS Sonoma with more resources
-    # - macos-15: macOS Sequoia (latest, recommended)
-    # - macos-15-xlarge: macOS Sequoia with more resources
-    # - macos-latest: Always points to newest macOS (currently 15)
-    # Note: macos-13 is deprecated and EOL Dec 2025
-    runs-on: macos-14  # Apple Silicon runner (M1) - required for MLX
+    runs-on: macos-26  # Apple Silicon runner - required for MLX
     strategy:
       fail-fast: false
       matrix:
@@ -70,14 +63,7 @@ jobs:
           pytest tests/ -k "mlx" -v --tb=short || echo "No additional MLX tests found in tests/"
 
   benchmark-mlx:
-    # Available arm64 (Apple Silicon) macOS runners for MLX:
-    # - macos-14: macOS Sonoma (stable, M1)
-    # - macos-14-xlarge: macOS Sonoma with more resources
-    # - macos-15: macOS Sequoia (latest, recommended)
-    # - macos-15-xlarge: macOS Sequoia with more resources
-    # - macos-latest: Always points to newest macOS (currently 15)
-    # Note: macos-13 is deprecated and EOL Dec 2025
-    runs-on: macos-14  # Apple Silicon runner (M1) - required for MLX
+    runs-on: macos-26  # Apple Silicon runner - required for MLX
     needs: test-mlx
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
 
