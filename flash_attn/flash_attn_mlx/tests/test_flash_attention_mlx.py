@@ -2509,23 +2509,32 @@ class TestKVCache:
         k_new = mx.random.normal((batch, seqlen_init, nheads, headdim)).astype(mx.float16) * 0.1
         v_new = mx.random.normal((batch, seqlen_init, nheads, headdim)).astype(mx.float16) * 0.1
 
-        out = flash_attn_with_kvcache(
+        # When k/v are provided, function returns (out, k_cache, v_cache)
+        out, k_cache_new, v_cache_new = flash_attn_with_kvcache(
             q, k_cache, v_cache,
             k=k_new, v=v_new,
             cache_seqlens=0,
             causal=True,
         )
-        mx.eval(out)
+        mx.eval(out, k_cache_new, v_cache_new)
 
         assert out.shape == (batch, 1, nheads, headdim)
         assert not mx.any(mx.isnan(out))
+        # Verify caches were updated
+        assert k_cache_new.shape == k_cache.shape
+        assert v_cache_new.shape == v_cache.shape
 
     def test_kvcache_incremental(self):
-        """Test incremental decoding with KV cache."""
+        """Test incremental decoding with KV cache.
+        
+        This test verifies that the function correctly returns updated caches
+        in contiguous mode, allowing proper incremental decoding without
+        manual cache updates.
+        """
         mx.random.seed(42)
         batch, max_seqlen, nheads, headdim = 1, 64, 4, 64
 
-        # Initial fill
+        # Initial fill - use the function to fill the cache
         seqlen_init = 8
         k_cache = mx.zeros((batch, max_seqlen, nheads, headdim), dtype=mx.float16)
         v_cache = mx.zeros((batch, max_seqlen, nheads, headdim), dtype=mx.float16)
@@ -2533,36 +2542,31 @@ class TestKVCache:
         k_init = mx.random.normal((batch, seqlen_init, nheads, headdim)).astype(mx.float16) * 0.1
         v_init = mx.random.normal((batch, seqlen_init, nheads, headdim)).astype(mx.float16) * 0.1
 
-        # Put initial KV into cache
-        k_cache = mx.concatenate([k_init, k_cache[:, seqlen_init:, :, :]], axis=1)
-        v_cache = mx.concatenate([v_init, v_cache[:, seqlen_init:, :, :]], axis=1)
+        # Initial fill using the function - returns updated caches
+        q_init = mx.random.normal((batch, 1, nheads, headdim)).astype(mx.float16) * 0.1
+        _, k_cache, v_cache = flash_attn_with_kvcache(
+            q_init, k_cache, v_cache,
+            k=k_init, v=v_init,
+            cache_seqlens=0,
+            causal=True,
+        )
+        mx.eval(k_cache, v_cache)
 
-        # Incremental decode - add one token at a time
+        # Incremental decode - add one token at a time using returned caches
         current_len = seqlen_init
         for i in range(4):
             q = mx.random.normal((batch, 1, nheads, headdim)).astype(mx.float16) * 0.1
             k_new = mx.random.normal((batch, 1, nheads, headdim)).astype(mx.float16) * 0.1
             v_new = mx.random.normal((batch, 1, nheads, headdim)).astype(mx.float16) * 0.1
 
-            out = flash_attn_with_kvcache(
+            # Function returns (out, k_cache, v_cache) - use returned caches
+            out, k_cache, v_cache = flash_attn_with_kvcache(
                 q, k_cache, v_cache,
                 k=k_new, v=v_new,
                 cache_seqlens=current_len,
                 causal=True,
             )
-            mx.eval(out)
-
-            # Update cache manually for next iteration
-            k_cache = mx.concatenate([
-                k_cache[:, :current_len, :, :],
-                k_new,
-                k_cache[:, current_len+1:, :, :]
-            ], axis=1)
-            v_cache = mx.concatenate([
-                v_cache[:, :current_len, :, :],
-                v_new,
-                v_cache[:, current_len+1:, :, :]
-            ], axis=1)
+            mx.eval(out, k_cache, v_cache)
             current_len += 1
 
             assert out.shape == (batch, 1, nheads, headdim)
@@ -2578,7 +2582,7 @@ class TestKVCache:
         k_cache = mx.random.normal((batch, cache_len, nheads, headdim)).astype(mx.float16) * 0.1
         v_cache = mx.random.normal((batch, cache_len, nheads, headdim)).astype(mx.float16) * 0.1
 
-        # Query without new K/V
+        # Query without new K/V - returns just out (no cache modification)
         q = mx.random.normal((batch, 4, nheads, headdim)).astype(mx.float16) * 0.1
 
         out = flash_attn_with_kvcache(

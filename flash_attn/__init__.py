@@ -7,13 +7,6 @@ def _is_apple_silicon():
     """Check if running on Apple Silicon."""
     return sys.platform == "darwin" and platform.machine() == "arm64"
 
-def _is_cuda_available():
-    """Check if CUDA is available."""
-    try:
-        import torch
-        return torch.cuda.is_available()
-    except ImportError:
-        return False
 
 # Platform-aware imports
 if _is_apple_silicon():

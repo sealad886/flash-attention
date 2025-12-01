@@ -706,6 +706,15 @@ def flash_attn_with_kvcache(
     attention query. In paged mode the cache is addressed indirectly via a
     block/page table, matching the contract from ``hopper/paged_kv.h``.
 
+    .. warning::
+        **Important difference from CUDA backend:** Due to MLX's immutable
+        array semantics, contiguous caches (non-paged mode) are NOT updated
+        in-place. When ``k`` and ``v`` are provided in contiguous mode, the
+        updated ``k_cache`` and ``v_cache`` tensors are returned as part of
+        the output tuple and the caller must use these returned tensors for
+        subsequent calls. In paged mode (when ``block_table`` is provided),
+        the cache buffers ARE updated in-place by the Metal kernel.
+
     Args:
         q: Query tensor of shape ``(batch, seqlen_q, nheads, headdim)``.
         k_cache: Key cache. Contiguous caches use
@@ -745,15 +754,45 @@ def flash_attn_with_kvcache(
             (after the LSE tensor if requested).
 
     Returns:
-        Either the attention output or a tuple ``(out, lse, cache_lens)``
-        depending on the ``return_*`` flags. ``out`` always has shape
-        ``(batch, seqlen_q, nheads, headdim)``; ``cache_lens`` matches the
-        format emitted by :func:`_normalize_cache_seqlens`.
+        The return value depends on whether new keys/values are provided and
+        the ``return_*`` flags:
+
+        **When ``k`` and ``v`` are provided (contiguous mode only):**
+            Returns a tuple starting with ``(out, k_cache, v_cache, ...)``:
+
+            - ``(out, k_cache, v_cache)`` - base case
+            - ``(out, k_cache, v_cache, lse)`` - with ``return_softmax_lse=True``
+            - ``(out, k_cache, v_cache, cache_seqlens)`` - with ``return_cache_seqlens=True``
+            - ``(out, k_cache, v_cache, lse, cache_seqlens)`` - with both flags
+
+        **When ``k`` and ``v`` are None (read-only) or paged mode:**
+            Returns as before:
+
+            - ``out`` - base case
+            - ``(out, lse)`` - with ``return_softmax_lse=True``
+            - ``(out, cache_seqlens)`` - with ``return_cache_seqlens=True``
+            - ``(out, lse, cache_seqlens)`` - with both flags
+
+        All outputs have shape ``(batch, seqlen_q, nheads, headdim)`` for ``out``.
 
     Raises:
         ValueError: If tensor shapes or block/table dimensions do not match.
         NotImplementedError: When attempting to write a contiguous cache with
             per-batch ``cache_seqlens`` (feature parity gap with CUDA).
+
+    Example:
+        >>> # Incremental decoding with contiguous cache
+        >>> k_cache = mx.zeros((batch, max_len, nheads_k, headdim))
+        >>> v_cache = mx.zeros((batch, max_len, nheads_k, headdim))
+        >>> cache_len = 0
+        >>> for step in range(num_steps):
+        ...     out, k_cache, v_cache = flash_attn_with_kvcache(
+        ...         q, k_cache, v_cache,
+        ...         k=k_new, v=v_new,
+        ...         cache_seqlens=cache_len,
+        ...         causal=True,
+        ...     )
+        ...     cache_len += k_new.shape[1]
     """
     batch, seqlen_q, nheads, headdim = q.shape
     _, max_seqlen_k, nheads_k, _ = k_cache.shape
@@ -776,6 +815,8 @@ def flash_attn_with_kvcache(
     cache_seqlens_is_int = isinstance(cache_seqlens, int) or cache_seqlens is None
 
     paged_kv_enabled = block_table is not None
+    # Track whether we modified the cache in contiguous mode (need to return updated caches)
+    contiguous_cache_updated = False
 
     if paged_kv_enabled:
         page_table = mx.array(block_table, dtype=mx.int32)
@@ -839,6 +880,7 @@ def flash_attn_with_kvcache(
 
                 new_seqlen = cache_seqlens_scalar + seqlen_new
                 cache_seqlens_result = cache_seqlens_arr + seqlen_new
+                contiguous_cache_updated = True
             else:
                 raise NotImplementedError(
                     "Variable cache_seqlens per batch not yet supported for writes. "
@@ -872,7 +914,21 @@ def flash_attn_with_kvcache(
     if DEBUG:
         print("flash_attn_mlx.py::flash_attn_with_kvcache outputs")
         print("out:", out.shape, out.dtype)
+        if contiguous_cache_updated:
+            print("k_cache (updated):", k_cache.shape, k_cache.dtype)
+            print("v_cache (updated):", v_cache.shape, v_cache.dtype)
 
+    # Return updated caches in contiguous mode when k/v were provided
+    if contiguous_cache_updated:
+        if return_softmax_lse and return_cache_seqlens:
+            return out, k_cache, v_cache, lse, cache_seqlens_result
+        if return_softmax_lse:
+            return out, k_cache, v_cache, lse
+        if return_cache_seqlens:
+            return out, k_cache, v_cache, cache_seqlens_result
+        return out, k_cache, v_cache
+
+    # Paged mode or read-only: original return format (caches modified in-place or unchanged)
     if return_softmax_lse and return_cache_seqlens:
         return out, lse, cache_seqlens_result
     if return_softmax_lse:
