@@ -1,0 +1,91 @@
+#!/bin/bash
+# =============================================================================
+# Git Pre-Push Hook for Flash Attention
+# =============================================================================
+# This hook runs MLX smoke tests before pushing on Apple Silicon Macs.
+# 
+# Install: make install-hooks
+# Skip:    git push --no-verify
+# =============================================================================
+
+set -e
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
+
+echo -e "${YELLOW}🔍 Pre-push hook: Checking MLX backend...${NC}"
+
+# Check if we're on Apple Silicon
+if [ "$(uname -s)" != "Darwin" ] || [ "$(uname -m)" != "arm64" ]; then
+    echo -e "${YELLOW}⏭️  Skipping MLX tests (not Apple Silicon)${NC}"
+    exit 0
+fi
+
+# Check if MLX-related files were modified
+MLX_CHANGED=$(git diff --name-only HEAD@{1}..HEAD 2>/dev/null | grep -E "(flash_attn_mlx|test.*mlx)" || true)
+
+if [ -z "$MLX_CHANGED" ]; then
+    echo -e "${GREEN}⏭️  No MLX files changed, skipping tests${NC}"
+    exit 0
+fi
+
+echo -e "${YELLOW}📦 MLX files changed:${NC}"
+echo "$MLX_CHANGED" | head -10
+if [ $(echo "$MLX_CHANGED" | wc -l) -gt 10 ]; then
+    echo "   ... and more"
+fi
+echo ""
+
+# Run quick smoke test
+echo -e "${YELLOW}🧪 Running MLX smoke test...${NC}"
+
+python -c "
+import sys
+try:
+    from flash_attn.flash_attn_mlx import flash_attn_func, is_mlx_available
+    
+    if not is_mlx_available():
+        print('⚠️  MLX not available (no Metal GPU detected)')
+        print('   Tests skipped - push will continue')
+        sys.exit(0)
+    
+    import mlx.core as mx
+    
+    # Quick smoke test
+    q = mx.random.normal((2, 64, 4, 64))
+    k = mx.random.normal((2, 64, 4, 64))
+    v = mx.random.normal((2, 64, 4, 64))
+    
+    out = flash_attn_func(q, k, v)
+    mx.eval(out)
+    
+    assert out.shape == q.shape, f'Shape mismatch: {out.shape} vs {q.shape}'
+    
+    # Test causal
+    out_causal = flash_attn_func(q, k, v, causal=True)
+    mx.eval(out_causal)
+    
+    print('✅ MLX smoke test passed!')
+    
+except ImportError as e:
+    print(f'⚠️  MLX not installed: {e}')
+    print('   Tests skipped - push will continue')
+except Exception as e:
+    print(f'❌ MLX smoke test FAILED: {e}')
+    print('')
+    print('Fix the issue or use: git push --no-verify')
+    sys.exit(1)
+"
+
+EXIT_CODE=$?
+if [ $EXIT_CODE -ne 0 ]; then
+    echo -e "${RED}❌ Pre-push check failed!${NC}"
+    echo -e "${YELLOW}   Fix the issue or use: git push --no-verify${NC}"
+    exit 1
+fi
+
+echo -e "${GREEN}✅ Pre-push checks passed!${NC}"
+exit 0
