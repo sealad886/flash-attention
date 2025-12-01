@@ -2526,7 +2526,7 @@ class TestKVCache:
 
     def test_kvcache_incremental(self):
         """Test incremental decoding with KV cache.
-        
+
         This test verifies that the function correctly returns updated caches
         in contiguous mode, allowing proper incremental decoding without
         manual cache updates.

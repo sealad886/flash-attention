@@ -70,7 +70,7 @@ jobs:
           import sys
           print('Python:', sys.version)
           print('Testing MLX module structure...')
-          
+
           # Test all imports work
           from flash_attn.flash_attn_mlx import (
               flash_attn_func,
@@ -79,14 +79,14 @@ jobs:
               flash_attn_with_kvcache,
           )
           print('All main interface functions imported successfully')
-          
+
           from flash_attn.flash_attn_mlx import (
               flash_attn_varlen_func,
               flash_attn_varlen_qkvpacked_func,
               flash_attn_varlen_kvpacked_func,
           )
           print('All varlen interface functions imported successfully')
-          
+
           print('MLX backend module structure verified!')
           "
 
