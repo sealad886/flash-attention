@@ -4,12 +4,22 @@ on:
   workflow_dispatch:
     inputs:
       runs-on:
-        description: "The runner to use for the build"
+        # Available arm64 (Apple Silicon) macOS runners for MLX:
+        # - macos-14: macOS Sonoma (stable, M1)
+        # - macos-14-xlarge: macOS Sonoma with more resources
+        # - macos-15: macOS Sequoia (latest, recommended)
+        # - macos-15-xlarge: macOS Sequoia with more resources
+        # - macos-latest: Always points to newest macOS (currently 15)
+        # Note: macos-13 is deprecated and EOL Dec 2025
+        description: "The runner to use for the build (all are arm64/Apple Silicon)"
         required: true
         type: choice
         options:
           - macos-14
+          - macos-14-xlarge
           - macos-15
+          - macos-15-xlarge
+          - macos-latest
         default: macos-14
       python-version:
         description: "The Python version to use for the build"
