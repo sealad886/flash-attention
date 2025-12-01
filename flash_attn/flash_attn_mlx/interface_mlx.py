@@ -21,7 +21,7 @@ from flash_attn.flash_attn_mlx.reference import (
     attention_ref_mlx,
     varlen_attention_ref_mlx,
 )
-from flash_attn.flash_attn_mlx.device import is_mlx_available, get_gpu_family
+# from flash_attn.flash_attn_mlx.device import is_mlx_available, get_gpu_family  # Removed unused imports
 from flash_attn.flash_attn_mlx.ops import flash_attention_mlx, flash_attention_with_lse, _state as _ops_state
 from flash_attn.flash_attn_mlx.varlen_ops import varlen_flash_attention_mlx
 from flash_attn.flash_attn_mlx.paged_cache import update_paged_kv_cache
@@ -165,39 +165,26 @@ def flash_attn_func(
             print("Using Metal kernel implementation")
 
         # Metal kernel now supports ALiBi and dropout - no fallback needed
-        needs_fallback = False
+        # Fallback is no longer needed; always use Metal kernel implementation below.
 
-        if needs_fallback:
-            if DEBUG:
-                print("Falling back to reference (feature not yet in Metal kernel)")
-            out, softmax_lse, attn_probs = attention_ref_mlx(
-                q, k, v,
-                dropout_p=dropout_p,
-                softmax_scale=softmax_scale,
-                causal=causal,
-                window_size=window_size,
-                softcap=softcap,
-                alibi_slopes=alibi_slopes,
-            )
-        else:
-            # Generate philox seed for dropout reproducibility
-            philox_seed, philox_offset = _resolve_philox_state(dropout_p)
+        # Generate philox seed for dropout reproducibility
+        philox_seed, philox_offset = _resolve_philox_state(dropout_p)
 
-            # Use flash_attention_mlx for autograd support (VJP registered)
-            out = flash_attention_mlx(
-                q, k, v,
-                softmax_scale=softmax_scale,
-                causal=causal,
-                softcap=softcap,
-                window_size=window_size,
-                alibi_slopes=alibi_slopes,
-                dropout_p=dropout_p,
-                philox_seed=philox_seed,
-                philox_offset=philox_offset,
-            )
-            # Retrieve LSE from ops state (set during forward)
-            softmax_lse = _ops_state.lse
-            attn_probs = None
+        # Use flash_attention_mlx for autograd support (VJP registered)
+        out = flash_attention_mlx(
+            q, k, v,
+            softmax_scale=softmax_scale,
+            causal=causal,
+            softcap=softcap,
+            window_size=window_size,
+            alibi_slopes=alibi_slopes,
+            dropout_p=dropout_p,
+            philox_seed=philox_seed,
+            philox_offset=philox_offset,
+        )
+        # Retrieve LSE from ops state (set during forward)
+        softmax_lse = _ops_state.lse
+        attn_probs = None
 
     if DEBUG:
         print("flash_attn_mlx.py::flash_attn_func outputs")
@@ -858,7 +845,7 @@ def flash_attn_with_kvcache(
                     "Use a uniform integer cache length when updating the contiguous cache.",
                 )
         else:
-            seqlen_new = 0
+
             cache_seqlens_result = cache_seqlens_arr
             if cache_seqlens_is_int:
                 new_seqlen = cache_seqlens_scalar
