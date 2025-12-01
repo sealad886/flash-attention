@@ -19,7 +19,7 @@ on:
 
 jobs:
   test-mlx:
-    runs-on: macos-14  # Apple Silicon runner (M1)
+    runs-on: macos-26  # Apple Silicon runner - required for MLX
     strategy:
       fail-fast: false
       matrix:
@@ -63,7 +63,7 @@ jobs:
           pytest tests/ -k "mlx" -v --tb=short || echo "No additional MLX tests found in tests/"
 
   benchmark-mlx:
-    runs-on: macos-14  # Apple Silicon runner (M1)
+    runs-on: macos-26  # Apple Silicon runner - required for MLX
     needs: test-mlx
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
 

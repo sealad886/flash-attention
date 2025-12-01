@@ -4,13 +4,12 @@ on:
   workflow_dispatch:
     inputs:
       runs-on:
-        description: "The runner to use for the build"
+        description: "The runner to use for the build (arm64/Apple Silicon)"
         required: true
         type: choice
         options:
-          - macos-14
-          - macos-15
-        default: macos-14
+          - macos-26
+        default: macos-26
       python-version:
         description: "The Python version to use for the build"
         required: true

@@ -4,10 +4,10 @@ on:
   workflow_call:
     inputs:
       runs-on:
-        description: "The runner to use for the build"
+        description: "The runner to use for the build (must be arm64/Apple Silicon for MLX)"
         required: true
         type: string
-        default: macos-14
+        default: macos-26
       python-version:
         description: "The Python version to use for the build"
         required: true
