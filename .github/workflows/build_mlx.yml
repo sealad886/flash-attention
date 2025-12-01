@@ -1,3 +1,9 @@
+# Manual workflow to build MLX wheels
+#
+# NOTE: GitHub-hosted macOS runners are virtualized and do NOT have Metal GPU access.
+# The build will succeed but GPU verification is limited to import tests only.
+# For full GPU testing, use a self-hosted Apple Silicon runner.
+
 name: Build MLX wheels
 
 on:

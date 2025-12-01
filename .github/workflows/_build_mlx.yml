@@ -1,10 +1,24 @@
+# MLX Backend Build Workflow Template
+#
+# IMPORTANT LIMITATION: GitHub-hosted macOS runners (macos-14, macos-15, macos-26)
+# are virtualized using Apple's Virtualization Framework, which does NOT support
+# Metal GPU access. This means:
+#   - MLX imports work (for package structure validation)
+#   - MLX GPU operations WILL FAIL (no Metal device available)
+#
+# For full MLX build testing with GPU verification, you need a self-hosted
+# Apple Silicon runner (Mac Mini, Mac Studio, etc.) with real Metal access.
+#
+# The default macos-26 runner will successfully build wheels but cannot verify
+# GPU functionality. We only verify imports and package structure.
+
 name: ~Build MLX wheel template
 
 on:
   workflow_call:
     inputs:
       runs-on:
-        description: "The runner to use for the build (must be arm64/Apple Silicon for MLX)"
+        description: "The runner to use for the build (GitHub-hosted macOS runners are virtualized without Metal GPU access)"
         required: true
         type: string
         default: macos-26
@@ -69,11 +83,14 @@ jobs:
             fi
           done
 
-      - name: Verify wheel
+      - name: Verify wheel (import test only - no GPU on virtualized runners)
         run: |
           pip install dist/*.whl
+          # Only test imports - actual GPU operations require Metal which isn't
+          # available on GitHub's virtualized macOS runners
           python -c "from flash_attn.flash_attn_mlx import flash_attn_func; print('MLX backend import successful')"
-          python -c "from flash_attn.flash_attn_mlx import is_mlx_available; print('MLX available:', is_mlx_available())"
+          python -c "from flash_attn.flash_attn_mlx.device import is_apple_silicon; print('Apple Silicon check:', is_apple_silicon())"
+          echo "Note: is_mlx_available() would return False on virtualized runners (no Metal GPU)"
 
       - name: Log Built Wheels
         run: |
