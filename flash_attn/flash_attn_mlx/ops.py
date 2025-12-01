@@ -63,7 +63,7 @@ def _create_combined_mask(
     window_size: Tuple[int, int],
     alibi_slopes: Optional[mx.array],
     dtype: mx.Dtype = mx.float32,
-) -> Optional[mx.array]:
+) -> Optional[mx.array|str]:        # type: ignore[type-arg]
     """
     Create a combined attention mask for MLX SDPA.
 

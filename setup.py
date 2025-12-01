@@ -630,8 +630,8 @@ else:
 
 # Install requirements differ by platform
 if IS_APPLE_SILICON:
-    # Apple Silicon: MLX backend, no torch required at runtime for flash_attn_mlx
-    install_requires = ["einops"]
+    # Apple Silicon: MLX backend with automatic MLX installation
+    install_requires = ["einops", "mlx>=0.20.0"]
 else:
     install_requires = ["torch", "einops"]
 
@@ -665,9 +665,6 @@ setup(
     cmdclass=cmdclass,
     python_requires=">=3.9",
     install_requires=install_requires,
-    extras_require={
-        "mlx": ["mlx>=0.20.0; sys_platform=='darwin'"],  # MLX backend for Apple Silicon
-    },
     setup_requires=[
         "packaging",
         "psutil",
