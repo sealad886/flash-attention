@@ -6,6 +6,35 @@ This page contains a partial list of places where FlashAttention is being used.
 If you'd like to add links to your organization / product / codebase, please open a
 PR or email us. We'd very much like to hear from you!
 
+## Variable-length Flash Attention on Apple Silicon (MLX)
+
+FlashAttention on MLX now ships the same variable-length (``cu_seqlens``) APIs as the CUDA backend, so ragged batches run without padding while still supporting causal masks, sliding windows, soft caps, and GQA/MQA. Requirements: macOS 14 or newer, MLX ≥ 0.29, and the MLX backend enabled (`pip install flash-attn mlx`).
+
+```python
+import itertools
+import mlx.core as mx
+from flash_attn.flash_attn_mlx import flash_attn_varlen_func
+
+seqlens = [97, 512, 8]
+cu_seqlens = mx.array([0, *itertools.accumulate(seqlens)], dtype=mx.int32)
+total = int(cu_seqlens[-1].item())
+
+q = mx.random.normal((total, 8, 64), dtype=mx.float16)
+k = mx.random.normal((total, 8, 64), dtype=mx.float16)
+v = mx.random.normal((total, 8, 64), dtype=mx.float16)
+
+out = flash_attn_varlen_func(
+  q, k, v,
+  cu_seqlens_q=cu_seqlens,
+  cu_seqlens_k=cu_seqlens,
+  max_seqlen_q=max(seqlens),
+  max_seqlen_k=max(seqlens),
+  causal=True,
+)
+```
+
+Use `flash_attn_varlen_qkvpacked_func` / `flash_attn_varlen_kvpacked_func` if you prefer packed layouts, and run `python benchmarks/benchmark_flash_attn_mlx.py --varlen-bench --quick` to compare padded vs. varlen throughput on Apple Silicon GPUs. See the MLX section in `README.md` for additional details and known limitations (e.g., varlen dropout currently relies on the reference implementation).
+
 ## Integrated into machine learning frameworks
 
 - Pytorch: [integrated](https://github.com/pytorch/pytorch/pull/81434) into core Pytorch in nn.Transformer.
@@ -23,7 +52,7 @@ PR or email us. We'd very much like to hear from you!
 - MosaicML [Composer](https://github.com/mosaicml/composer)
   [library](https://www.mosaicml.com/blog/gpt-3-quality-for-500k). Composer is a
   library for efficient neural network training.
-  
+
 - EleutherAI's [GPT-NeoX](https://github.com/EleutherAI/gpt-neox/pull/725). This is a research library for training large language transformer models at scale based on NVIDIA's Megatron-LM and Microsoft's DeepSpeed.
 
 - PaddlePaddle: integrated into the framework with [API](https://github.com/PaddlePaddle/Paddle/blob/develop/python/paddle/nn/functional/flash_attention.py) `paddle.nn.functional.flash_attention`.

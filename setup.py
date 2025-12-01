@@ -19,15 +19,29 @@ import urllib.request
 import urllib.error
 from wheel.bdist_wheel import bdist_wheel as _bdist_wheel
 
-import torch
-from torch.utils.cpp_extension import (
-    BuildExtension,
-    CppExtension,
-    CUDAExtension,
-    CUDA_HOME,
-    ROCM_HOME,
-    IS_HIP_EXTENSION,
-)
+# Detect if we're on Apple Silicon (no CUDA/ROCm build needed)
+IS_APPLE_SILICON = platform.system() == "Darwin" and platform.machine() == "arm64"
+
+# Only import torch and CUDA build utilities when needed for native builds
+if not IS_APPLE_SILICON:
+    import torch
+    from torch.utils.cpp_extension import (
+        BuildExtension,
+        CppExtension,
+        CUDAExtension,
+        CUDA_HOME,
+        ROCM_HOME,
+        IS_HIP_EXTENSION,
+    )
+else:
+    # Stubs for Apple Silicon - no native extension build needed
+    torch = None
+    BuildExtension = None
+    CppExtension = None
+    CUDAExtension = None
+    CUDA_HOME = None
+    ROCM_HOME = None
+    IS_HIP_EXTENSION = False
 
 
 with open("README.md", "r", encoding="utf-8") as fh:
@@ -39,7 +53,11 @@ this_dir = os.path.dirname(os.path.abspath(__file__))
 
 BUILD_TARGET = os.environ.get("BUILD_TARGET", "auto")
 
-if BUILD_TARGET == "auto":
+# On Apple Silicon, skip all CUDA/ROCm logic
+if IS_APPLE_SILICON:
+    IS_ROCM = False
+    SKIP_CUDA_BUILD = True
+elif BUILD_TARGET == "auto":
     if IS_HIP_EXTENSION:
         IS_ROCM = True
     else:
@@ -49,6 +67,8 @@ else:
         IS_ROCM = False
     elif BUILD_TARGET == "rocm":
         IS_ROCM = True
+    else:
+        IS_ROCM = False
 
 PACKAGE_NAME = "flash_attn"
 
@@ -59,14 +79,15 @@ BASE_WHEEL_URL = (
 # FORCE_BUILD: Force a fresh build locally, instead of attempting to find prebuilt wheels
 # SKIP_CUDA_BUILD: Intended to allow CI to use a simple `python setup.py sdist` run to copy over raw files, without any cuda compilation
 FORCE_BUILD = os.getenv("FLASH_ATTENTION_FORCE_BUILD", "FALSE") == "TRUE"
-SKIP_CUDA_BUILD = os.getenv("FLASH_ATTENTION_SKIP_CUDA_BUILD", "FALSE") == "TRUE"
+if not IS_APPLE_SILICON:
+    SKIP_CUDA_BUILD = os.getenv("FLASH_ATTENTION_SKIP_CUDA_BUILD", "FALSE") == "TRUE"
 # For CI, we want the option to build with C++11 ABI since the nvcr images use C++11 ABI
 FORCE_CXX11_ABI = os.getenv("FLASH_ATTENTION_FORCE_CXX11_ABI", "FALSE") == "TRUE"
 USE_TRITON_ROCM = os.getenv("FLASH_ATTENTION_TRITON_AMD_ENABLE", "FALSE") == "TRUE"
 SKIP_CK_BUILD = os.getenv("FLASH_ATTENTION_SKIP_CK_BUILD", "TRUE") == "TRUE" if USE_TRITON_ROCM else False
 
 @functools.lru_cache(maxsize=None)
-def cuda_archs() -> str:
+def cuda_archs() -> list[str]:
     return os.getenv("FLASH_ATTN_CUDA_ARCHS", "80;90;100;110;120").split(";")
 
 
@@ -74,12 +95,13 @@ def get_platform():
     """
     Returns the platform name as used in wheel filenames.
     """
-    if sys.platform.startswith("linux"):
+    cur_platform = sys.platform
+    if cur_platform.startswith("linux"):
         return f'linux_{platform.uname().machine}'
-    elif sys.platform == "darwin":
+    elif cur_platform == "darwin":
         mac_version = ".".join(platform.mac_ver()[0].split(".")[:2])
         return f"macosx_{mac_version}_x86_64"
-    elif sys.platform == "win32":
+    elif cur_platform == "win32":
         return "win_amd64"
     else:
         raise ValueError("Unsupported platform: {}".format(sys.platform))
@@ -145,7 +167,7 @@ def add_cuda_gencodes(cc_flag, archs, bare_metal_version):
         cc_flag += ["-gencode", f"arch=compute_{newest},code=compute_{newest}"]
 
     return cc_flag
-    
+
 
 def get_hip_version():
     return parse(torch.version.hip.split()[-1].rstrip('-').replace('-', '+'))
@@ -500,6 +522,10 @@ def get_package_version():
 
 
 def get_wheel_url():
+    # On Apple Silicon, no prebuilt wheels with CUDA/ROCm tags exist
+    if IS_APPLE_SILICON:
+        return None, None
+
     torch_version_raw = parse(torch.__version__)
     python_version = f"cp{sys.version_info.major}{sys.version_info.minor}"
     platform_name = get_platform()
@@ -539,10 +565,17 @@ class CachedWheelsCommand(_bdist_wheel):
     """
 
     def run(self):
+        # On Apple Silicon, just build the pure-Python wheel directly (no prebuilt CUDA wheels)
+        if IS_APPLE_SILICON:
+            return super().run()
+
         if FORCE_BUILD:
             return super().run()
 
         wheel_url, wheel_filename = get_wheel_url()
+        if wheel_url is None:
+            return super().run()
+
         print("Guessing wheel URL: ", wheel_url)
         try:
             urllib.request.urlretrieve(wheel_url, wheel_filename)
@@ -565,25 +598,42 @@ class CachedWheelsCommand(_bdist_wheel):
             super().run()
 
 
-class NinjaBuildExtension(BuildExtension):
-    def __init__(self, *args, **kwargs) -> None:
-        # do not override env MAX_JOBS if already exists
-        if not os.environ.get("MAX_JOBS"):
-            import psutil
+# Only define NinjaBuildExtension when BuildExtension is available (CUDA/ROCm builds)
+if BuildExtension is not None:
+    class NinjaBuildExtension(BuildExtension):
+        def __init__(self, *args, **kwargs) -> None:
+            # do not override env MAX_JOBS if already exists
+            if not os.environ.get("MAX_JOBS"):
+                import psutil
 
-            # calculate the maximum allowed NUM_JOBS based on cores
-            max_num_jobs_cores = max(1, os.cpu_count() // 2)
+                # calculate the maximum allowed NUM_JOBS based on cores
+                max_num_jobs_cores = max(1, os.cpu_count() // 2)
 
-            # calculate the maximum allowed NUM_JOBS based on free memory
-            free_memory_gb = psutil.virtual_memory().available / (1024 ** 3)  # free memory in GB
-            max_num_jobs_memory = int(free_memory_gb / 9)  # each JOB peak memory cost is ~8-9GB when threads = 4
+                # calculate the maximum allowed NUM_JOBS based on free memory
+                free_memory_gb = psutil.virtual_memory().available / (1024 ** 3)  # free memory in GB
+                max_num_jobs_memory = int(free_memory_gb / 9)  # each JOB peak memory cost is ~8-9GB when threads = 4
 
-            # pick lower value of jobs based on cores vs memory metric to minimize oom and swap usage during compilation
-            max_jobs = max(1, min(max_num_jobs_cores, max_num_jobs_memory))
-            os.environ["MAX_JOBS"] = str(max_jobs)
+                # pick lower value of jobs based on cores vs memory metric to minimize oom and swap usage during compilation
+                max_jobs = max(1, min(max_num_jobs_cores, max_num_jobs_memory))
+                os.environ["MAX_JOBS"] = str(max_jobs)
 
-        super().__init__(*args, **kwargs)
+            super().__init__(*args, **kwargs)
+else:
+    NinjaBuildExtension = None
 
+
+# Build cmdclass based on what's available
+if ext_modules and NinjaBuildExtension is not None:
+    cmdclass = {"bdist_wheel": CachedWheelsCommand, "build_ext": NinjaBuildExtension}
+else:
+    cmdclass = {"bdist_wheel": CachedWheelsCommand}
+
+# Install requirements differ by platform
+if IS_APPLE_SILICON:
+    # Apple Silicon: MLX backend with automatic MLX installation
+    install_requires = ["einops", "mlx>=0.20.0"]
+else:
+    install_requires = ["torch", "einops"]
 
 setup(
     name=PACKAGE_NAME,
@@ -612,19 +662,11 @@ setup(
         "Operating System :: Unix",
     ],
     ext_modules=ext_modules,
-    cmdclass={"bdist_wheel": CachedWheelsCommand, "build_ext": NinjaBuildExtension}
-    if ext_modules
-    else {
-        "bdist_wheel": CachedWheelsCommand,
-    },
+    cmdclass=cmdclass,
     python_requires=">=3.9",
-    install_requires=[
-        "torch",
-        "einops",
-    ],
+    install_requires=install_requires,
     setup_requires=[
         "packaging",
         "psutil",
-        "ninja",
-    ],
+    ] + (["ninja"] if not IS_APPLE_SILICON else []),
 )
