@@ -5,18 +5,21 @@ Flash Attention MLX Benchmark Suite
 This script benchmarks Flash Attention performance on Apple Silicon.
 It compares:
 
-1. The Metal kernel implementation vs. MLX's built-in SDPA (baseline).
-2. Paged KV cache attention vs. contiguous cache attention, including
+1. The Metal kernel implementation vs. MLX's built-in SDPA (GPU baseline).
+2. GPU implementations vs. CPU baseline (NumPy reference).
+3. Paged KV cache attention vs. contiguous cache attention, including
     memory footprint comparisons.
 
 Usage:
     python benchmark_flash_attn_mlx.py [--batch-sizes 1 2 4] [--seq-lens 512 1024 2048]
+    python benchmark_flash_attn_mlx.py --cpu-comparison  # Include CPU baseline
 
 Results include:
 - Forward pass time and TFLOPS
 - Backward pass time and TFLOPS
 - Memory usage estimates
 - Comparison against MLX SDPA baseline
+- Comparison against CPU baseline (when --cpu-comparison is set)
 """
 
 import argparse
@@ -24,6 +27,7 @@ import math
 import time
 from typing import List, Tuple, Dict, Any, Optional, Sequence
 
+import numpy as np
 import mlx.core as mx
 from flash_attn.flash_attn_mlx.interface_mlx import (
     flash_attn_func,
@@ -38,6 +42,91 @@ from flash_attn.flash_attn_mlx.tests.varlen_test_utils import (
     VARLEN_SEQLEN_CASES,
     make_varlen_qkv,
 )
+
+
+# ============================================================================
+# CPU Reference Implementation (NumPy)
+# ============================================================================
+
+def attention_cpu_forward(
+    q: np.ndarray,
+    k: np.ndarray,
+    v: np.ndarray,
+    softmax_scale: float,
+    causal: bool,
+) -> np.ndarray:
+    """
+    CPU reference implementation of scaled dot-product attention using NumPy.
+
+    Args:
+        q: Query tensor (batch, seqlen_q, nheads, headdim)
+        k: Key tensor (batch, seqlen_k, nheads_k, headdim)
+        v: Value tensor (batch, seqlen_k, nheads_k, headdim)
+        softmax_scale: Scaling factor for attention scores
+        causal: Whether to apply causal masking
+
+    Returns:
+        Output tensor (batch, seqlen_q, nheads, headdim)
+    """
+    batch, seqlen_q, nheads, headdim = q.shape
+    _, seqlen_k, nheads_k, _ = k.shape
+
+    # Handle GQA: expand K, V heads if needed
+    if nheads_k != nheads:
+        repeat_factor = nheads // nheads_k
+        k = np.repeat(k, repeat_factor, axis=2)
+        v = np.repeat(v, repeat_factor, axis=2)
+
+    # Transpose to (batch, nheads, seqlen, headdim)
+    q = np.transpose(q, (0, 2, 1, 3))
+    k = np.transpose(k, (0, 2, 1, 3))
+    v = np.transpose(v, (0, 2, 1, 3))
+
+    # Compute attention scores: (batch, nheads, seqlen_q, seqlen_k)
+    scores = np.einsum("bhqd,bhkd->bhqk", q, k) * softmax_scale
+
+    # Apply causal mask
+    if causal:
+        mask = np.triu(np.ones((seqlen_q, seqlen_k), dtype=bool), k=1)
+        scores = np.where(mask, -np.inf, scores)
+
+    # Softmax
+    scores_max = np.max(scores, axis=-1, keepdims=True)
+    scores_exp = np.exp(scores - scores_max)
+    scores_sum = np.sum(scores_exp, axis=-1, keepdims=True)
+    attn_weights = scores_exp / scores_sum
+
+    # Apply attention to values
+    out = np.einsum("bhqk,bhkd->bhqd", attn_weights, v)
+
+    # Transpose back to (batch, seqlen_q, nheads, headdim)
+    return np.transpose(out, (0, 2, 1, 3))
+
+
+def benchmark_cpu_forward(
+    q_np: np.ndarray,
+    k_np: np.ndarray,
+    v_np: np.ndarray,
+    causal: bool,
+    warmup_iters: int = 2,
+    bench_iters: int = 5,
+) -> Tuple[float, np.ndarray]:
+    """Benchmark CPU forward pass."""
+    batch, seqlen_q, nheads, headdim = q_np.shape
+    softmax_scale = 1.0 / math.sqrt(headdim)
+
+    # Warmup
+    for _ in range(warmup_iters):
+        out = attention_cpu_forward(q_np, k_np, v_np, softmax_scale, causal)
+
+    # Benchmark
+    start = time.perf_counter()
+    for _ in range(bench_iters):
+        out = attention_cpu_forward(q_np, k_np, v_np, softmax_scale, causal)
+    end = time.perf_counter()
+
+    avg_time = (end - start) / bench_iters
+    return avg_time, out
 
 
 def compute_flops(batch: int, seqlen_q: int, seqlen_k: int, nheads: int, headdim: int) -> Dict[str, float]:
@@ -466,6 +555,7 @@ def run_benchmark(
     head_dims: List[int],
     causal: bool = True,
     dtype: mx.Dtype = mx.float16,
+    include_cpu: bool = False,
 ) -> List[Dict[str, Any]]:
     """Run benchmarks across configurations."""
     results = []
@@ -505,6 +595,26 @@ def run_benchmark(
                         fwd_time_sdpa = bwd_time_sdpa = float('inf')
                         sdpa_ok = False
 
+                    # Benchmark CPU (NumPy) if requested
+                    fwd_time_cpu = float('inf')
+                    cpu_ok = False
+                    if include_cpu:
+                        try:
+                            # Convert to NumPy for CPU benchmark
+                            q_np = np.array(q, dtype=np.float32)
+                            k_np = np.array(k, dtype=np.float32)
+                            v_np = np.array(v, dtype=np.float32)
+                            # Use fewer iters for CPU since it's slow
+                            cpu_iters = max(1, min(5, 1024 // seqlen))
+                            fwd_time_cpu, _ = benchmark_cpu_forward(
+                                q_np, k_np, v_np, causal,
+                                warmup_iters=1,
+                                bench_iters=cpu_iters,
+                            )
+                            cpu_ok = True
+                        except Exception as e:
+                            print(f"  CPU error: {e}")
+
                     result = {
                         "batch": batch,
                         "seqlen": seqlen,
@@ -522,6 +632,9 @@ def run_benchmark(
                         "sdpa_bwd_tflops": flops["backward"] / bwd_time_sdpa / 1e12 if sdpa_ok else 0,
                         "fwd_speedup": fwd_time_sdpa / fwd_time_flash if flash_ok and sdpa_ok else 0,
                         "bwd_speedup": bwd_time_sdpa / bwd_time_flash if flash_ok and sdpa_ok else 0,
+                        "cpu_fwd_time_ms": fwd_time_cpu * 1000 if cpu_ok else float('inf'),
+                        "cpu_fwd_tflops": flops["forward"] / fwd_time_cpu / 1e12 if cpu_ok else 0,
+                        "gpu_vs_cpu_speedup": fwd_time_cpu / fwd_time_flash if flash_ok and cpu_ok else 0,
                     }
                     results.append(result)
 
@@ -534,6 +647,10 @@ def run_benchmark(
                         print(f"  SDPA Bwd:  {bwd_time_sdpa*1000:.2f} ms ({format_tflops(flops['backward'], bwd_time_sdpa)} TFLOPS)")
                     if flash_ok and sdpa_ok:
                         print(f"  Speedup:   Fwd {result['fwd_speedup']:.2f}x, Bwd {result['bwd_speedup']:.2f}x")
+                    if cpu_ok:
+                        print(f"  CPU Fwd:   {fwd_time_cpu*1000:.2f} ms ({format_tflops(flops['forward'], fwd_time_cpu)} TFLOPS)")
+                        if flash_ok:
+                            print(f"  GPU vs CPU: {result['gpu_vs_cpu_speedup']:.1f}x faster on Metal")
 
     return results
 
@@ -647,22 +764,34 @@ def run_kvcache_benchmark(
     return results
 
 
-def print_summary(results: List[Dict[str, Any]]):
+def print_summary(results: List[Dict[str, Any]], include_cpu: bool = False):
     """Print benchmark summary table."""
-    print("\n" + "=" * 100)
+    print("\n" + "=" * 120)
     print("BENCHMARK SUMMARY")
-    print("=" * 100)
-    print(f"{'Config':<30} {'Flash Fwd':<12} {'Flash Bwd':<12} {'SDPA Fwd':<12} {'SDPA Bwd':<12} {'Speedup':<12}")
-    print("-" * 100)
+    print("=" * 120)
 
-    for r in results:
-        config = f"B{r['batch']}S{r['seqlen']}H{r['nheads']}D{r['headdim']}"
-        flash_fwd = f"{r['flash_fwd_tflops']:.2f} TF"
-        flash_bwd = f"{r['flash_bwd_tflops']:.2f} TF"
-        sdpa_fwd = f"{r['sdpa_fwd_tflops']:.2f} TF"
-        sdpa_bwd = f"{r['sdpa_bwd_tflops']:.2f} TF"
-        speedup = f"{r['fwd_speedup']:.2f}x/{r['bwd_speedup']:.2f}x"
-        print(f"{config:<30} {flash_fwd:<12} {flash_bwd:<12} {sdpa_fwd:<12} {sdpa_bwd:<12} {speedup:<12}")
+    if include_cpu:
+        print(f"{'Config':<25} {'Flash Fwd':<11} {'SDPA Fwd':<11} {'CPU Fwd':<11} {'GPU Speedup':<12} {'GPU vs CPU':<12}")
+        print("-" * 120)
+        for r in results:
+            config = f"B{r['batch']}S{r['seqlen']}H{r['nheads']}D{r['headdim']}"
+            flash_fwd = f"{r['flash_fwd_tflops']:.2f} TF"
+            sdpa_fwd = f"{r['sdpa_fwd_tflops']:.2f} TF"
+            cpu_fwd = f"{r['cpu_fwd_tflops']:.4f} TF" if r.get('cpu_fwd_tflops', 0) > 0 else "N/A"
+            speedup = f"{r['fwd_speedup']:.2f}x"
+            gpu_cpu = f"{r.get('gpu_vs_cpu_speedup', 0):.0f}x" if r.get('gpu_vs_cpu_speedup', 0) > 0 else "N/A"
+            print(f"{config:<25} {flash_fwd:<11} {sdpa_fwd:<11} {cpu_fwd:<11} {speedup:<12} {gpu_cpu:<12}")
+    else:
+        print(f"{'Config':<30} {'Flash Fwd':<12} {'Flash Bwd':<12} {'SDPA Fwd':<12} {'SDPA Bwd':<12} {'Speedup':<12}")
+        print("-" * 120)
+        for r in results:
+            config = f"B{r['batch']}S{r['seqlen']}H{r['nheads']}D{r['headdim']}"
+            flash_fwd = f"{r['flash_fwd_tflops']:.2f} TF"
+            flash_bwd = f"{r['flash_bwd_tflops']:.2f} TF"
+            sdpa_fwd = f"{r['sdpa_fwd_tflops']:.2f} TF"
+            sdpa_bwd = f"{r['sdpa_bwd_tflops']:.2f} TF"
+            speedup = f"{r['fwd_speedup']:.2f}x/{r['bwd_speedup']:.2f}x"
+            print(f"{config:<30} {flash_fwd:<12} {flash_bwd:<12} {sdpa_fwd:<12} {sdpa_bwd:<12} {speedup:<12}")
 
 
 def print_kvcache_summary(results: List[Dict[str, Any]]):
@@ -703,6 +832,8 @@ def main():
                        help="Disable causal masking")
     parser.add_argument("--quick", action="store_true",
                        help="Run quick benchmark with fewer configs")
+    parser.add_argument("--cpu-comparison", action="store_true",
+                       help="Include CPU (NumPy) baseline comparison")
     parser.add_argument("--varlen-bench", action="store_true",
                        help="Run varlen vs padded benchmarks for ragged batches")
     parser.add_argument("--varlen-warmup-iters", type=int, default=5,
@@ -785,6 +916,7 @@ def main():
     print(f"  Head counts: {head_counts}")
     print(f"  Head dimensions: {head_dims}")
     print(f"  Causal: {causal}")
+    print(f"  CPU comparison: {args.cpu_comparison}")
 
     if args.varlen_bench:
         print("\nVarlen benchmark configuration:")
@@ -813,9 +945,10 @@ def main():
         head_counts=head_counts,
         head_dims=head_dims,
         causal=causal,
+        include_cpu=args.cpu_comparison,
     )
 
-    print_summary(results)
+    print_summary(results, include_cpu=args.cpu_comparison)
 
     if args.varlen_bench:
         varlen_results = run_varlen_benchmark(
